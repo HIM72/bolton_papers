@@ -1,0 +1,806 @@
+---
+title: "COVD_CH"
+author: "Kelly Bolton"
+date: "8/2/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(tidyverse)
+library(magrittr)
+#library(dplyr)
+library(ggplot2)
+library(reshape2)
+#library(stringr)
+#library(readr)
+library(RColorBrewer)
+library(ggpubr)
+library(gridGraphics)
+library(ggsci)
+library(ggsignif)
+library(grid)
+library(kableExtra)
+library(ggrepel)
+library(sjPlot)
+library(sjlabelled)
+library(sjmisc)
+library(forcats)
+library(survminer)
+library(ggplotify)
+#library(compareGroups)
+library(patchwork)
+library(geepack)
+library(scales)
+library(table1)
+library(data.table)
+library(metafor)
+library(imputeTS)
+library(lubridate)
+options(na.action = "na.omit")
+source('toolbox.R')
+knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+do_plot = function(p, f, w, h, r = 300, save_pdf = T) {
+  ggsave(f, plot = p, width = w, height = h, dpi = r)
+  if (save_pdf) {
+    ggsave(paste0(str_remove(f, '\\..+'), '.pdf'), plot = p, width = w, height = h, dpi = r)
+  }
+  knitr::include_graphics(f)
+}
+```
+
+```{r read in data}
+#Main data
+M_long_de_id = suppressWarnings(data.table::fread("input/M_long_de_id.txt", sep = '\t', header = T))
+M_wide_de_id = suppressWarnings(data.table::fread("input/M_wide_de_id.txt", sep = '\t', header = T))
+```
+
+```{r Table 1}
+#Table 1
+D = M_wide_de_id  %>% 
+      mutate(htn_verbose = case_when (
+     any_htn == 0 ~ "No",
+     any_htn == 1 ~ "Yes",
+     TRUE ~ "No"
+     )) %>%
+        mutate(cad_verbose = case_when (
+     any_cad == 0 ~ "No",
+     any_cad == 1 ~ "Yes",
+    TRUE ~ "No"
+     )) %>%
+        mutate(copd_asthma_verbose = case_when (
+     any_copd_asthma == 0 ~ "No",
+     any_copd_asthma == 1 ~ "Yes",
+    TRUE ~ "No"
+     )) %>%
+          mutate(diabetes_verbose = case_when (
+     any_diabetes == 0 ~ "No",
+     any_diabetes == 1 ~ "Yes",
+      TRUE ~ "No"
+     )) %>%
+           mutate(gender_v = case_when (
+     gender == "M" ~ "Male",
+     gender == "F" ~ "Female"
+           )) %>%
+          mutate(month_v = case_when (
+     covid_month == 3 ~ "March",
+     covid_month == 4 ~ "April",
+     covid_month == 5 ~ "May",
+     covid_month == 6 ~ "June",
+           )) %>%
+           mutate(ind_cytotoxic_therapy_v = case_when (
+     ind_cytotoxic_therapy == 0 ~ "No",
+    ind_cytotoxic_therapy == 1 ~ "Yes"
+          )) %>% 
+           mutate(ind_post_cytotoxic_therapy_v = case_when (
+     ind_post_cytotoxic_therapy == 0 ~ "No",
+    ind_post_cytotoxic_therapy == 1 ~ "Yes"
+           )) %>% 
+           mutate(thoracic_cancer_v = case_when (
+     thoracic_cancer == 0 ~ "Other primary tumor site",
+     thoracic_cancer == 1 ~ "Thoracic primary tumor site"))
+
+
+
+label(D$agegroups) <- "Age(y)"
+label(D$gender_v) <- "Gender"
+label(D$smoke_bin) <- "Smoking"
+label(D$htn_verbose) <- "Hypertension"
+label(D$cad_verbose) <- "Coronary Artery Disease"
+label(D$copd_asthma_verbose) <- "COPD/Asthma"
+label(D$diabetes_verbose) <- "Diabetes"
+label(D$race_bin) <- "Race"
+label(D$ind_cytotoxic_therapy_v) <- "Cytotoxic Therapy Prior to Blood Draw"
+label(D$ind_post_cytotoxic_therapy_v) <- "Cytotoxic Therapy After Blood Draw"
+label(D$thoracic_cancer_v) <- "Primary Tumor Site"
+label(D$BMIi) <- "BMI"
+label(D$month_v) <- "Month Testing"
+
+D <- D %>% mutate(month_v=ifelse(covid_cat=="Untested","N/A",month_v))
+
+
+D <- D %>% mutate(covid_cat = factor(covid_cat, levels = c("Severe covid","Non-severe covid","Negative","Untested")))
+
+table1(~ agegroups + gender_v + smoke_bin + htn_verbose + cad_verbose + copd_asthma_verbose + diabetes_verbose + race_bin + month_v + BMIi + ind_cytotoxic_therapy_v + ind_post_cytotoxic_therapy_v + thoracic_cancer_v | covid_cat, data=D, overall=F, output="markdown", export="ktab")
+```
+
+```{r plots by age}
+
+D <- M_wide_de_id
+
+
+##Plot by age
+panel_theme = theme_bw() + theme(
+    panel.border = element_blank(),
+    legend.position = "top",
+    panel.grid.minor = element_blank(),
+    plot.subtitle = element_text(hjust = 0.5, size = 8),
+    plot.title = element_text(face = 'bold', size = 12, hjust = 0, vjust = -11),
+    panel.grid.major = element_blank(),
+    strip.background = element_blank(),
+    strip.text = element_text(size = 10),
+    axis.text.y = element_text(size = 10),
+    axis.text.x = element_text(size = 10),
+    axis.title = element_text(size = 10),
+    axis.line = element_line(),
+    plot.margin = unit(c(0,0,0,0), 'pt')
+) 
+
+get_ch_grouped = function(D, CI = F) {
+
+    CH_by_age_grouped = D %>% select(DEIDENTIFICATION_ID, agegroups, CH) %>%
+        mutate(CH = ifelse(is.na(CH), 0, CH)) %>%
+        group_by(agegroups) %>%
+        summarise(CH = sum(CH), total = n()) %>% 
+        filter(!is.na(agegroups)) %>%
+        mutate(freq = CH / total)
+    
+    if (CI) {
+        CH_by_age_grouped = CH_by_age_grouped %>%
+        cbind(
+            apply(CH_by_age_grouped, 1, function(row) {
+                CI = prop.test(row['CH'], row['total'], conf.level=0.95)$conf.int[1:2]
+                return(c(lower = CI[1], upper = CI[2]))
+            }) %>% t
+        )
+    }
+    
+    return(CH_by_age_grouped)
+}
+
+font_size = 12
+
+age_curve_theme = 
+  theme(
+      legend.position = 'top',
+      legend.key.size = unit(5, 'mm'),
+      legend.title = element_blank(),
+      legend.direction = 'horizontal',
+      plot.title = element_text(hjust = -0.08),
+      axis.text.x = element_text(angle = 45, vjust = 0.5, size = font_size),
+      axis.text.y = element_text(size = font_size),
+      axis.title = element_text(size = font_size),
+      legend.text = element_text(size = font_size)
+  )
+
+## Age CH All
+agegroup_counts= rbind(
+    get_ch_grouped(D %>% filter(covid_cat == "Severe covid") %>% mutate(CH = CH_all)) %>% mutate(covid_cat = "Severe COVID"),
+    get_ch_grouped(D %>% filter(covid_cat == "Non-severe covid") %>% mutate(CH = CH_all)) %>% mutate(covid_cat = "Non-Severe COVID"),
+    get_ch_grouped(D %>% filter(covid_cat == "Negative") %>% mutate(CH = CH_all)) %>% mutate(covid_cat = "Negative"),
+    get_ch_grouped(D %>% filter(covid_cat == "Untested") %>% mutate(CH = CH_all)) %>% mutate(covid_cat = "Untested")
+)
+
+agegroup_counts$covid_cat <- factor(agegroup_counts$covid_cat, levels = c("Non-Severe COVID", "Severe COVID", "Untested", "Negative"))
+
+agegroup_counts <- agegroup_counts %>% rowwise() %>% mutate(CI_lower = prop.test(CH, total, conf.level = .95)$conf.int[1], CI_upper = prop.test(CH, total, conf.level = .95)$conf.int[2]) %>% mutate(type = ifelse(grepl("Background", covid_cat), "simul", "actual"))
+
+ggplot(agegroup_counts, aes(x = agegroups, y = freq, group = covid_cat, color = covid_cat)) + 
+  geom_point(position = position_dodge(width = .4), aes(shape = type), show.legend = F) + 
+  geom_errorbar(aes(ymin = CI_lower, ymax = CI_upper), position = position_dodge(width = .4), width = 0) + 
+  scale_color_manual(values = c("steelblue", "darkred", "lightgreen", "darkorange")) + 
+  ylab("Proportion of patients with CH mutations") + 
+  xlab("Age")
+ggsave("output/age_vs_CH_with_covid_categories.pdf", width = 10, height = 4)
+```
+
+```{r plots by tumor}
+#Categories by tumor type
+
+D <- M_wide_de_id
+
+
+##Plot by age
+panel_theme = theme_bw() + theme(
+    panel.border = element_blank(),
+    legend.position = "top",
+    panel.grid.minor = element_blank(),
+    plot.subtitle = element_text(hjust = 0.5, size = 8),
+    plot.title = element_text(face = 'bold', size = 12, hjust = 0, vjust = -11),
+    panel.grid.major = element_blank(),
+    strip.background = element_blank(),
+    strip.text = element_text(size = 10),
+    axis.text.y = element_text(size = 10),
+    axis.text.x = element_text(size = 10),
+    axis.title = element_text(size = 10),
+    axis.line = element_line(),
+    plot.margin = unit(c(0,0,0,0), 'pt')
+) 
+
+D <- D  %>% mutate(tumor_groups=case_when(systemtumortype=="thoracic" ~ "thoracic",
+                                          systemtumortype=="breast" ~ "breast",
+                                          systemtumortype=="gastrointestinal" ~ "GI",
+                                          systemtumortype=="gynecologic" ~ "GYN",
+                                          systemtumortype=="GU" ~ "GU",
+                                          TRUE ~ "Other"))
+
+get_ch_grouped = function(D, CI = F) {
+
+    CH_by_tumor_grouped = D %>% select(DEIDENTIFICATION_ID, tumor_groups, CH) %>%
+        mutate(CH = ifelse(is.na(CH), 0, CH)) %>%
+        group_by(tumor_groups) %>%
+        summarise(CH = sum(CH), total = n()) %>% 
+        filter(!is.na(tumor_groups)) %>%
+        mutate(freq = CH / total)
+    
+    if (CI) {
+        CH_by_tumor_grouped = CH_by_tumor_grouped %>%
+        cbind(
+            apply( CH_by_tumor_grouped, 1, function(row) {
+                CI = prop.test(row['CH'], row['total'], conf.level=0.95)$conf.int[1:2]
+                return(c(lower = CI[1], upper = CI[2]))
+            }) %>% t
+        )
+    }
+    
+    return(CH_by_tumor_grouped)
+}
+
+font_size = 12
+
+age_curve_theme = 
+  theme(
+      legend.position = 'top',
+      legend.key.size = unit(5, 'mm'),
+      legend.title = element_blank(),
+      legend.direction = 'horizontal',
+      plot.title = element_text(hjust = -0.08),
+      axis.text.x = element_text(angle = 45, vjust = 0.5, size = font_size),
+      axis.text.y = element_text(size = font_size),
+      axis.title = element_text(size = font_size),
+      legend.text = element_text(size = font_size)
+  )
+
+## Tumor CH All
+tumorgroup_counts= rbind(
+    get_ch_grouped(D %>% filter(covid_cat == "Severe covid") %>% mutate(CH = CH_all)) %>% mutate(covid_cat = "Severe COVID"),
+    get_ch_grouped(D %>% filter(covid_cat == "Non-severe covid") %>% mutate(CH = CH_all)) %>% mutate(covid_cat = "Non-Severe COVID"),
+    get_ch_grouped(D %>% filter(covid_cat == "Negative") %>% mutate(CH = CH_all)) %>% mutate(covid_cat = "Negative"),
+    get_ch_grouped(D %>% filter(covid_cat == "Untested") %>% mutate(CH = CH_all)) %>% mutate(covid_cat = "Untested")
+)
+
+tumorgroup_counts$covid_cat <- factor(tumorgroup_counts$covid_cat, levels = c("Non-Severe COVID", "Severe COVID", "Untested", "Negative"))
+
+tumorgroup_counts <- tumorgroup_counts %>% rowwise() %>% mutate(CI_lower = prop.test(CH, total, conf.level = .95)$conf.int[1], CI_upper = prop.test(CH, total, conf.level = .95)$conf.int[2]) %>% mutate(type = ifelse(grepl("Background", covid_cat), "simul", "actual"))
+
+ggplot(tumorgroup_counts, aes(x = tumor_groups, y = freq, group = covid_cat, color = covid_cat)) + 
+  geom_point(position = position_dodge(width = .4), aes(shape = type), show.legend = F) + 
+  geom_errorbar(aes(ymin = CI_lower, ymax = CI_upper), position = position_dodge(width = .4), width = 0) + 
+  scale_color_manual(values = c("steelblue", "darkred", "lightgreen", "darkorange")) + 
+  ylab("Proportion of patients with CH mutations") + 
+  xlab("Primary Tumor Site")
+ggsave("output/tumor_vs_CH_with_covid_categories.pdf", width = 10, height = 4)
+```
+
+```{r histogram by gene}
+#CH by gene
+
+D_wide <-  M_wide_de_id 
+
+D_long <-  M_long_de_id  
+
+
+panel_theme = theme_bw() + theme(
+    panel.border = element_blank(),
+    legend.position = "bottom",
+    panel.grid.minor = element_blank(),
+    plot.subtitle = element_text(hjust = 0.5, size = 10),
+    plot.title = element_text(face = 'bold', size = 12, hjust = 0, vjust = -11),
+    panel.grid.major = element_blank(),
+    strip.background = element_blank(),
+    strip.text = element_text(size = 10),
+    axis.text.y = element_text(size = 10),
+    axis.text.x = element_text(size = 10),
+    axis.title = element_text(size = 10),
+    axis.line = element_line(),
+    plot.margin = unit(c(0,0,0,0), 'pt')
+) 
+
+## Histogram by gene frequency
+gene_list = M %>% count(Gene) %>% arrange(-n) %>% .$Gene %>% unique %>% .[1:10]
+
+n_severe = D_wide %>% count(covid_cat) %>% filter(covid_cat == "Severe covid") %>% pull(n)
+n_non_severe = D_wide %>% count(covid_cat) %>% filter(covid_cat == "Non-severe covid") %>% pull(n)
+n_negative =  D_wide %>% count(covid_cat) %>% filter(covid_cat == "Negative") %>% pull(n)
+n_untested =  D_wide %>% count(covid_cat) %>% filter(covid_cat == "Untested") %>% pull(n)
+
+
+# tally
+D = D_long %>% filter(!is.na(covid_cat)) %>%
+    reshape2::dcast(
+        formula = Gene + covid_cat ~ .,
+        value.var = 'DEIDENTIFICATION_ID',
+        fun.aggregate = function(MRNs) {length(unique(MRNs))}
+    ) %>%
+    dplyr::rename("n_patient" = ".") %>%
+    mutate(
+        prop_patient = case_when(
+            covid_cat == "Severe covid" ~ n_patient/n_severe,
+            covid_cat == "Non-severe covid" ~ n_patient/n_non_severe,
+            covid_cat == "Negative" ~ n_patient/n_negative,
+            covid_cat == "Untested" ~ n_patient/n_untested
+        )
+    ) %>%
+    filter(Gene %in% gene_list) %>%
+    mutate(
+        Gene = factor(Gene, gene_list)) %>%
+    arrange(Gene)
+
+D <- D %>% mutate(covid_cat = factor(covid_cat, levels = c("Severe covid","Non-severe covid","Negative","Untested")))
+
+gene <- ggplot(
+      D,
+      aes(x = Gene, y = prop_patient, fill = covid_cat)
+  ) +
+  geom_bar(stat = 'identity', position = "dodge", color = 'black', size = 0.25) +
+  panel_theme +
+  # theme(
+  #     panel.grid.major = element_blank(), 
+  #     panel.border = element_blank(),
+  #     axis.line = element_line(colour = "black"),
+  #     legend.title = element_blank(),
+  #     legend.key.size = unit(5, 'mm'),
+  #     legend.position = 'top',
+  #     legend.direction = 'horizontal',
+  #     axis.title = element_text(size = font_size),
+  #     axis.text.x = element_text(angle = 45, hjust = 1, size = font_size),
+  #     legend.text = element_text(size = font_size)
+  # ) +
+  ylab("Proportion with mutated Gene") +
+  xlab('') +
+  scale_fill_nejm()
+
+do_plot(gene, "output/gene_bar.png", 8, 4, save_pdf = T)
+
+```
+```{r histogram of non-driver gene}
+#histogram of top mutated genes that are non-drivers for severe covid
+
+D <- M_long_de_id %>% filter(covid_cat=="Severe covid" & CH_nondriver==1)
+
+gene_list = D %>% count(Gene) %>% arrange(-n) %>% .$Gene %>% unique
+
+nondriver <- ggplot(
+    D %>% filter(Gene %in% gene_list) %>% mutate(Gene = factor(Gene, gene_list)) %>% count(Gene),
+    aes(x = Gene, y = n)
+) + 
+geom_bar(stat = 'identity') +
+theme_bw() +
+ggtitle("Non-Driver CH frequency") +
+theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+do_plot(nondriver, "output/nondriver_bar.png", 8, 4, save_pdf = T)
+
+
+##silent
+
+D <- M_long_de_id %>% filter(covid_cat=="Severe covid" & CH_silent==1)
+
+gene_list = D %>% count(Gene) %>% arrange(-n) %>% .$Gene %>% unique
+
+silent <- ggplot(
+    D %>% filter(Gene %in% gene_list) %>% mutate(Gene = factor(Gene, gene_list)) %>% count(Gene),
+    aes(x = Gene, y = n)
+) + 
+geom_bar(stat = 'identity') +
+theme_bw() +
+ggtitle("Silent CH frequency") +
+theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+do_plot(silent, "output/silent_bar.png", 8, 4, save_pdf = T)
+
+```
+
+
+```{r regression severe _vs_nonsevere using hypoxia}
+#Logistic regression severe vs non-severe
+
+glm_sev_vs_nonsev_hpox <- do_glm_and_plot_or(data = M_wide_de_id, 
+                   response = "sevr_non", 
+                   terms_for_formula = c("age_scaled + smoke_bin + race_bin + gender + any_htn + any_cad + any_diabetes + any_copd_asthma + ind_cytotoxic_therapy + ind_post_cytotoxic_therapy + thoracic_cancer"), 
+                   terms_to_iterate = c("CH_all", "CH_nondriver","CH_silent", "CH_pd"), 
+                   max_OR = 4, 
+                   terms_to_plot = c("CH_pd", "CH_nondriver","CH_silent","CH_all"), 
+                   plot_name = "output/OR_Covid_severe_VS_nonsevere.pdf", width = 12, height = 3)
+```
+
+```{r regression severe _vs_nonsevere using hypoxia}
+#Logistic regression severe vs non-severe adjusted for BMI and month of COVID
+
+
+glm_sev_vs_nonsev_hpox <- do_glm_and_plot_or(data = M_wide_de_id, 
+                   response = "sevr_non", 
+                   terms_for_formula = c("age_scaled + smoke_bin + race_bin + gender + any_htn + any_cad + any_diabetes + any_copd_asthma + ind_cytotoxic_therapy + ind_post_cytotoxic_therapy + thoracic_cancer + BMIi + as.factor(covid_month)"), 
+                  terms_to_iterate = c("CH_all", "CH_nondriver","CH_silent", "CH_pd"),
+                   max_OR = 4, 
+                   terms_to_plot = c("CH_pd", "CH_nondriver","CH_silent","CH_all"), 
+                   plot_name = "output/OR_Covid_severe_VS_nonsevere.pdf", width = 12, height = 3)
+```
+
+```{r sensitiviy and stratified analyses}
+
+#Logistic regression severe vs non-severe limited to hospitalized cases
+
+hosp <- M_wide_de_id %>% filter(hospitalized_covid==1)
+
+glm_sev_vs_nonsev_hpox <- do_glm_and_plot_or(data = hosp, 
+                   response = "sevr_non", 
+                   terms_for_formula = c("age_scaled + smoke_bin + race_bin + gender + any_htn + any_cad + any_diabetes + any_copd_asthma + ind_cytotoxic_therapy + ind_post_cytotoxic_therapy + thoracic_cancer"), 
+                   terms_to_iterate = c("CH_all", "CH_nondriver","CH_silent", "CH_pd"), 
+                   max_OR = 4, 
+                   terms_to_plot = c("CH_all", "CH_nondriver","CH_silent", "CH_pd"), 
+                   plot_name = "output/OR_Covid_severe_VS_nonsevere_sens_hosp.pdf", width = 12, height = 3)
+
+#Logistic regression severe vs non-severe limited to those without and without cytotoxic therapy
+
+no_cyto <- M_wide_de_id %>% filter(ind_cytotoxic_therapy==0)
+
+glm_sev_vs_nonsev_hpox <- do_glm_and_plot_or(data = no_cyto, 
+                   response = "sevr_non", 
+                   terms_for_formula = c("age_scaled + smoke_bin + race_bin + gender + any_htn + any_cad + any_diabetes + any_copd_asthma + ind_post_cytotoxic_therapy + thoracic_cancer"), 
+                   terms_to_iterate = c("CH_all", "CH_nondriver","CH_silent", "CH_pd"), 
+                   max_OR = 4, 
+                   terms_to_plot = c("CH_all", "CH_nondriver","CH_silent", "CH_pd"), 
+                   plot_name = "output/OR_Covid_severe_VS_nonsevere_sens_hosp.pdf", width = 12, height = 3)
+
+cyto <- M_wide_de_id %>% filter(ind_cytotoxic_therapy==1)
+
+glm_sev_vs_nonsev_hpox <- do_glm_and_plot_or(data = cyto, 
+                   response = "sevr_non", 
+                   terms_for_formula = c("age_scaled + smoke_bin + race_bin + gender + any_htn + any_cad + any_diabetes + any_copd_asthma + ind_post_cytotoxic_therapy + thoracic_cancer"), 
+                   terms_to_iterate = c("CH_all", "CH_nondriver","CH_silent", "CH_pd"), 
+                   max_OR = 4, 
+                   terms_to_plot = c("CH_all", "CH_nondriver","CH_silent", "CH_pd"), 
+                   plot_name = "output/OR_Covid_severe_VS_nonsevere_sens_hosp.pdf", width = 12, height = 3)
+
+#Logistic regression severe vs non-severe by lung and non-lung
+
+no_lung <- M_wide_de_id %>% filter(thoracic_cancer==0)
+
+glm_sev_vs_nonsev_hpox <- do_glm_and_plot_or(data = no_lung, 
+                   response = "sevr_non", 
+                   terms_for_formula = c("age_scaled + smoke_bin + race_bin + gender + any_htn + any_cad + any_diabetes + any_copd_asthma + ind_cytotoxic_therapy + ind_post_cytotoxic_therapy"), 
+                   terms_to_iterate = c("CH_all", "CH_nondriver","CH_silent", "CH_pd"), 
+                   max_OR = 4, 
+                   terms_to_plot = c("CH_all", "CH_nondriver","CH_silent", "CH_pd"), 
+                   plot_name = "output/OR_Covid_severe_VS_nonsevere_sens_hosp.pdf", width = 12, height = 3)
+
+lung <- M_wide_de_id %>% filter(thoracic_cancer==1)
+
+glm_sev_vs_nonsev_hpox <- do_glm_and_plot_or(data = lung, 
+                   response = "sevr_non", 
+                   terms_for_formula = c("age_scaled + smoke_bin + race_bin + gender + any_htn + any_cad + any_diabetes + any_copd_asthma + ind_cytotoxic_therapy + ind_post_cytotoxic_therapy"), 
+                   terms_to_iterate = c("CH_all", "CH_nondriver","CH_silent", "CH_pd"), 
+                   max_OR = 4, 
+                   terms_to_plot = c("CH_all", "CH_nondriver","CH_silent", "CH_pd"), 
+                   plot_name = "output/OR_Covid_severe_VS_nonsevere_sens_hosp.pdf", width = 12, height = 3)
+```
+
+```{r regression severe resp_vs_nonsevere with death}
+#Logistic regression for covid-related death vs non-severe
+glm_sev_vs_nonsev_d <- do_glm_and_plot_or(data = M_wide_de_id, 
+                   response = "sevd_non", 
+                   terms_for_formula = c("age_scaled + smoke_bin + race_bin + gender + any_htn + any_cad + any_diabetes + any_copd_asthma + ind_cytotoxic_therapy + ind_post_cytotoxic_therapy + thoracic_cancer"), 
+                   terms_to_iterate = c("CH_all", "CH_nondriver","CH_silent", "CH_pd"), 
+                   max_OR = 4, 
+                   terms_to_plot = c("CH_all", "CH_nondriver","CH_silent", "CH_pd"), 
+                   plot_name = "output/OR_Covid_severe_VS_nonsevere.pdf", width = 12, height = 3)
+```
+
+```{r regression severe_vs_nonsevere with non-rebreather or intubation}
+#Logistic regression vent vs non-severe
+glm_sev_vs_nonsev_d <- do_glm_and_plot_or(data = M_wide_de_id, 
+                   response = "sevv_non", 
+                   terms_for_formula = c("age_scaled + smoke_bin + race_bin + gender + any_htn + any_cad + any_diabetes + any_copd_asthma + ind_cytotoxic_therapy + ind_post_cytotoxic_therapy + thoracic_cancer"), 
+                   terms_to_iterate = c("CH_all", "CH_nondriver","CH_silent", "CH_pd"), 
+                   max_OR = 4, 
+                   terms_to_plot = c("CH_all", "CH_nondriver","CH_silent", "CH_pd"), 
+                   plot_name = "output/OR_Covid_severe_VS_nonsevere.pdf", width = 12, height = 3)
+```
+
+```{r regression mutation number severe_vs_nonsevere}
+#Logistic regression with mutation number for hypoxia
+
+###severe vs non-severe
+
+##p-trend for mutnum
+
+logit_gene_var = list()
+
+ch_list <-  c("mutnum_all")
+
+for (ch in ch_list) {
+    D = M_wide_de_id %>% filter(get(ch)>0)
+    logit = glm(
+        formula = sevr_non ~ age_scaled + smoke_bin + race_bin + gender + any_htn + any_cad + any_diabetes + any_copd_asthma + ind_cytotoxic_therapy + ind_post_cytotoxic_therapy + thoracic_cancer + get(ch),
+        data = D,
+        family = "binomial")
+    logit_data = logit %>% sjPlot::get_model_data(type="est") %>% cbind(CH = ch)
+    logit_gene_var = rbind(logit_gene_var, logit_data)
+}
+
+logit_gene_var %>% filter(term=="get(ch)")
+
+###severe vs non-severe mutation number as categorical variable
+M_wide_de_id <- M_wide_de_id %>% mutate(CH_mutnum_bin=as.factor(CH_mutnum_bin))
+
+glm_sev_vs_non_mutnum <-do_glm_and_plot_or(data =M_wide_de_id, 
+                   response = "sevr_non", 
+                   terms_for_formula = c("age_scaled + smoke_bin + race_bin + gender + any_htn + any_cad + any_diabetes + any_copd_asthma + ind_cytotoxic_therapy + ind_post_cytotoxic_therapy + thoracic_cancer + BMIi + as.factor(covid_month)"), 
+                   terms_to_iterate = c("CH_mutnum_bin"), 
+                   terms_to_plot = c("CH_mutnum_bin1","CH_mutnum_bin2"), 
+                   max_OR = 3, 
+                   plot_name = "output/OR_Mutation_count_Covid_severe_VS_nonsevere.pdf")
+```
+
+```{r regression Maximum VAF}
+#Logistic regression with maximum VAF 
+
+###severe vs non-severe
+
+M_wide_de_id <- M_wide_de_id %>% mutate(CH_vaf_bin=as.factor(CH_vaf_bin))
+
+glm_sev_vs_non_vaf <-do_glm_and_plot_or(data = M_wide_de_id, 
+                   response = "sevr_non", 
+                   terms_for_formula = c("age_scaled + smoke_bin + race_bin + gender + any_htn + any_cad + any_diabetes + any_copd_asthma + ind_cytotoxic_therapy + ind_post_cytotoxic_therapy + thoracic_cancer"), 
+                   terms_to_iterate = c("CH_vaf_bin"), 
+                   terms_to_plot = c("CH_vaf_bin1","CH_vaf_bin2"), 
+                   max_OR = 5, 
+                   plot_name = "output/OR_Mutation_count_Covid_severe_VS_nonsevere.pdf")
+
+##p-trend for max_VAF
+
+logit_gene_var = list()
+
+ch_list <-  c("VAF_all")
+
+for (ch in ch_list) {
+    D =  M_wide_de_id %>% filter(get(ch)>0)
+    logit = glm(
+        formula = sevr_non ~ age_scaled + smoke_bin + race_bin + gender + any_htn + any_cad + ind_cytotoxic_therapy + ind_post_cytotoxic_therapy + thoracic_cancer + any_diabetes + any_copd_asthma + get(ch),
+        data = D,
+        family = "binomial")
+    logit_data = logit %>% sjPlot::get_model_data(type="est") %>% cbind(CH = ch)
+    logit_gene_var = rbind(logit_gene_var, logit_data)
+}
+
+logit_gene_var %>% filter(term=="get(ch)")
+```
+
+```{r}
+#Import datatable combined with Korean study for severity defined by hypoxia
+library(readxl)
+combo <- read_excel("tables_combined_estimates.xlsx", sheet = "CH and COVID severity")
+combo <- combo %>% filter(!is.na(study))
+combo_estimates <- combo %>% mutate(yi=log(estimate), vi=(std.error)^2)
+
+
+#Severity meta with hypoxia or death as measure of severity
+severe_all <- combo_estimates %>% filter(term=="CH_all")
+res <- rma(yi, vi, data=severe_all, method="FE")
+
+#forst plot with annotations
+pdf("output/Covid_severe_VS_ALL_meta.pdf", width = 8, height =5)
+forest(res, atransf=exp, at=log(c(.05, .25, 1, 4)), xlim=c(-16,6),
+       ilab=cbind(severe_all$case, severe_all$case_with_var, severe_all$control, severe_all$control_with_var),
+       ilab.xpos=c(-9.5,-8,-6,-4.5), header="Study",
+       slab=severe_all$study, xlab="Odds Ratio", cex=1)
+op <- par(cex=1, font=2)
+text(c(-9.5,-8,-6,-4.5), 4, c("CH+", "CH-", "CH+", "CH-"))
+text(c(-9,-5),     4.5, c("Severe COVID", "Non-Severe"))
+
+### add text with Q-value, dfs, p-value, and I^2 statistic
+text(-13, -1, pos=4, cex=1, bquote(paste("(p = ", .(formatC(res$pval, digits=2, format="f")), ")")))
+par(op)
+dev.off()
+```
+
+```{r combine severity (hypoxia) CH subtypes}
+#forst plot with annotations CH-PD
+pdf("output/ch_pd_meta.pdf", width = 8, height =5)
+severe_all <- combo_estimates %>% filter(term=="ch_pd")
+res <- rma(yi, vi, data=severe_all, method="FE")
+forest(res, atransf=exp, at=log(c(.05, .25, 1, 4)), xlim=c(-12,8),
+       ilab=cbind(severe_all$case, severe_all$case_with_var, severe_all$control, severe_all$control_with_var),
+       ilab.xpos=c(-9.5,-8,-6,-4.5), header="Study",
+       slab=severe_all$study, xlab="Odds Ratio", cex=1)
+op <- par(cex=1, font=2)
+text(c(-9.5,-8,-6,-4.5), 4, c("CH+", "CH-", "CH+", "CH-"))
+text(c(-9,-5),     4.5, c("Severe COVID", "Non-Severe"))
+### add text with Q-value, dfs, p-value, and I^2 statistic
+text(-9.5, -1, pos=4, cex=1, bquote(paste("(p = ", .(formatC(res$pval, digits=2, format="f")), ")")))
+dev.off()
+
+#forst plot with annotations CH-nondriver_az
+pdf("output/ch_nonpd_meta.pdf", width = 8, height =5)
+severe_all <- combo_estimates %>% filter(term=="ch_nondriver_az")
+res <- rma(yi, vi, data=severe_all, method="FE")
+forest(res, atransf=exp, at=log(c(.05, .25, 1, 4)), xlim=c(-12,8),
+       ilab=cbind(severe_all$case, severe_all$case_with_var, severe_all$control, severe_all$control_with_var),
+       ilab.xpos=c(-9.5,-8,-6,-4.5), header="Study",
+       slab=severe_all$study, xlab="Odds Ratio", cex=1)
+op <- par(cex=1, font=2)
+text(c(-9.5,-8,-6,-4.5), 4, c("CH+", "CH-", "CH+", "CH-"))
+text(c(-9,-5),     4.5, c("Severe COVID", "Non-Severe"))
+### add text with Q-value, dfs, p-value, and I^2 statistic
+text(-9.5, -1, pos=4, cex=1, bquote(paste("(p = ", .(formatC(res$pval, digits=2, format="f")), ")")))
+dev.off()
+
+#forst plot with annotations CH-silent
+pdf("output/ch_silent_meta.pdf", width = 8, height =5)
+severe_all <- combo_estimates %>% filter(term=="CH_silent")
+res <- rma(yi, vi, data=severe_all, method="FE")
+forest(res, atransf=exp, at=log(c(.05, .25, 1, 4)), xlim=c(-12,8),
+       ilab=cbind(severe_all$case, severe_all$case_with_var, severe_all$control, severe_all$control_with_var),
+       ilab.xpos=c(-9.5,-8,-6,-4.5), header="Study",
+       slab=severe_all$study, xlab="Odds Ratio", cex=1)
+op <- par(cex=1, font=2)
+text(c(-9.5,-8,-6,-4.5), 4, c("CH+", "CH-", "CH+", "CH-"))
+text(c(-9,-5),     4.5, c("Severe COVID", "Non-Severe"))
+### add text with Q-value, dfs, p-value, and I^2 statistic
+text(-9.5, -1, pos=4, cex=1, bquote(paste("(p = ", .(formatC(res$pval, digits=2, format="f")), ")")))
+dev.off()
+```
+
+```{r mutation number meta-analysis}
+combo <- read_excel("input/tables_combined_estimates.xlsx", sheet = "CH Mutation Number and COVID")
+combo <- combo %>% filter(!is.na(Study))
+combo_estimates <- combo %>% mutate(yi=log(estimate), vi=(std.error)^2)
+
+#1 CH mutation
+pdf("output/ch_mut1_meta.pdf", width = 8, height =5)
+mn1 <- combo_estimates %>% filter(term=="CH_mutnum_bin1")
+res <- rma(yi, vi, data=mn1, method="FE")
+forest(res, atransf=exp, at=log(c(.05, .25, 1, 4)), xlim=c(-12,8),
+       ilab=cbind(mn1$case, mn1$case_with_var, mn1$control, mn1$control_with_var),
+       ilab.xpos=c(-9.5,-8,-6,-4.5), header="Study",
+       slab=mn1$Study, xlab="Odds Ratio", cex=1)
+op <- par(cex=1, font=2)
+text(c(-9.5,-8,-6,-4.5), 4, c("CH+", "CH-", "CH+", "CH-"))
+text(c(-9,-5),     4.5, c("Severe COVID", "Non-Severe"))
+### add text with Q-value, dfs, p-value, and I^2 statistic
+text(-9.5, -1, pos=4, cex=1, bquote(paste("(p = ", .(formatC(res$pval, digits=2, format="f")), ")")))
+dev.off()
+
+#2 CH Mutations
+pdf("output/ch_mut2_meta.pdf", width = 8, height =5)
+mn2 <- combo_estimates %>% filter(term=="CH_mutnum_bin2")
+res <- rma(yi, vi, data=mn2, method="FE")
+forest(res, atransf=exp, at=log(c(.05, .25, 1, 4)), xlim=c(-12,8),
+       ilab=cbind(mn2$case, mn2$case_with_var, mn2$control, mn2$control_with_var),
+       ilab.xpos=c(-9.5,-8,-6,-4.5), header="Study",
+       slab=mn2$Study, xlab="Odds Ratio", cex=1)
+op <- par(cex=1, font=2)
+text(c(-9.5,-8,-6,-4.5), 4, c("CH+", "CH-", "CH+", "CH-"))
+text(c(-9,-5),     4.5, c("Severe COVID", "Non-Severe"))
+### add text with Q-value, dfs, p-value, and I^2 statistic
+text(-9.5, -1, pos=4, cex=1, bquote(paste("(p = ", .(formatC(res$pval, digits=2, format="f")), ")")))
+dev.off()
+```
+
+```{r VAF meta-analysis}
+combo <- read_excel("input/tables_combined_estimates.xlsx", sheet = "CH VAF and COVID")
+combo <- combo %>% filter(!is.na(Study))
+combo_estimates <- combo %>% mutate(yi=log(estimate), vi=(std.error)^2)
+
+#1 CH mutation
+pdf("output/ch_vaf1_meta.pdf", width = 8, height =5)
+vaf1 <- combo_estimates %>% filter(term=="CH_vaf_bin1")
+res <- rma(yi, vi, data=vaf1, method="FE")
+forest(res, atransf=exp, at=log(c(.05, .25, 1, 4)), xlim=c(-12,8),
+       ilab=cbind(vaf1$case, vaf1$case_with_var, vaf1$control_with_var, vaf1$control_with_var),
+       ilab.xpos=c(-9.5,-8,-6,-4.5), header="Study",
+       slab=vaf1$Study, xlab="Odds Ratio", cex=1)
+op <- par(cex=1, font=2)
+text(c(-9.5,-8,-6,-4.5), 4, c("CH+", "CH-", "CH+", "CH-"))
+text(c(-9,-5),     4.5, c("Severe COVID", "Non-Severe"))
+### add text with Q-value, dfs, p-value, and I^2 statistic
+text(-9.5, -1, pos=4, cex=1, bquote(paste("(p = ", .(formatC(res$pval, digits=2, format="f")), ")")))
+dev.off()
+
+#2 CH Mutations
+pdf("output/ch_vaf2_meta.pdf", width = 8, height =5)
+vaf2 <- combo_estimates %>% filter(term=="CH_vaf_bin2")
+res <- rma(yi, vi, data=vaf2, method="FE")
+forest(res, atransf=exp, at=log(c(.05, .25, 1, 4)), xlim=c(-12,8),
+       ilab=cbind(vaf2$case, vaf2$case_with_var, vaf2$control, vaf2$control_with_var),
+       ilab.xpos=c(-9.5,-8,-6,-4.5), header="Study",
+       slab=vaf2$Study, xlab="Odds Ratio", cex=1)
+op <- par(cex=1, font=2)
+text(c(-9.5,-8,-6,-4.5), 4, c("CH+", "CH-", "CH+", "CH-"))
+text(c(-9,-5),     4.5, c("Severe COVID", "Non-Severe"))
+### add text with Q-value, dfs, p-value, and I^2 statistic
+text(-9.5, -1, pos=4, cex=1, bquote(paste("(p = ", .(formatC(res$pval, digits=2, format="f")), ")")))
+dev.off()
+```
+
+```{r combine severity (ventilaion)}
+#Import datatable combined with Korean study for severity defined by nonrebreather
+library(readxl)
+combo <- read_excel("tables_combined_estimates.xlsx", sheet = "CH and ventilation")
+combo <- combo %>% filter(!is.na(study))
+combo_estimates <- combo %>% mutate(yi=log(estimate), vi=(std.error)^2)
+
+#Severity meta with death as measure of severity
+severe_all <- combo_estimates %>% filter(term=="CH_all")
+res <- rma(yi, vi, data=severe_all, method="FE")
+
+#forst plot with annotations
+pdf("output/ch_vent_meta.pdf", width = 8, height =5)
+forest(res, atransf=exp, at=log(c(.05, .25, 1, 4)), xlim=c(-16,6),
+       ilab=cbind(severe_all$case, severe_all$case_with_var, severe_all$control, severe_all$control_with_var),
+       ilab.xpos=c(-9.5,-8,-6,-4.5), header="Study",
+       slab=severe_all$study, xlab="Odds Ratio", cex=1)
+op <- par(cex=0.75, font=2)
+text(c(-9.5,-8,-6,-4.5), 4, c("CH+", "CH-", "CH+", "CH-"))
+text(c(-9,-5),     4.5, c("Severe COVID", "Non-Severe"))
+### add text with Q-value, dfs, p-value, and I^2 statistic
+text(-9.5, -1, pos=4, cex=1, bquote(paste("(p = ", .(formatC(res$pval, digits=2, format="f")), ")")))
+dev.off()
+
+#Subtypes
+
+#forst plot with annotations CH-PD
+severe_all <- combo_estimates %>% filter(term=="ch_pd")
+pdf("output/chpd_vent_meta.pdf", width = 8, height =5)
+res <- rma(yi, vi, data=severe_all, method="FE")
+forest(res, atransf=exp, at=log(c(.05, .25, 1, 4)), xlim=c(-16,6),
+       ilab=cbind(severe_all$case, severe_all$case_with_var, severe_all$control, severe_all$control_with_var),
+       ilab.xpos=c(-9.5,-8,-6,-4.5), header="Study",
+       slab=severe_all$study, xlab="Odds Ratio", cex=1)
+op <- par(cex=0.75, font=2)
+text(c(-9.5,-8,-6,-4.5), 4, c("CH+", "CH-", "CH+", "CH-"))
+text(c(-9,-5),     4.5, c("Death COVID", "No Death"))
+### add text with Q-value, dfs, p-value, and I^2 statistic
+text(-9.5, -1, pos=4, cex=1, bquote(paste("(p = ", .(formatC(res$pval, digits=2, format="f")), ")")))
+dev.off()
+
+#forst plot with annotations CH-nondriver_az
+severe_all <- combo_estimates %>% filter(term=="ch_nondriver_az")
+pdf("output/chnonpd_vent_meta.pdf", width = 8, height =5)
+res <- rma(yi, vi, data=severe_all, method="FE")
+forest(res, atransf=exp, at=log(c(.05, .25, 1, 4)), xlim=c(-16,6),
+       ilab=cbind(severe_all$case, severe_all$case_with_var, severe_all$control, severe_all$control_with_var),
+       ilab.xpos=c(-9.5,-8,-6,-4.5), header="Study",
+       slab=severe_all$study, xlab="Odds Ratio", cex=1)
+op <- par(cex=0.75, font=2)
+text(c(-9.5,-8,-6,-4.5), 4, c("CH+", "CH-", "CH+", "CH-"))
+text(c(-9,-5),     4.5, c("Death COVID", "No Death"))
+### add text with Q-value, dfs, p-value, and I^2 statistic
+text(-9.5, -1, pos=4, cex=1, bquote(paste("(p = ", .(formatC(res$pval, digits=2, format="f")), ")")))
+dev.off()
+
+#forst plot with annotations CH-silent
+severe_all <- combo_estimates %>% filter(term=="CH_silent")
+pdf("output/chsil_vent_meta.pdf", width = 8, height =5)
+res <- rma(yi, vi, data=severe_all, method="FE")
+forest(res, atransf=exp, at=log(c(.05, .25, 1, 4)), xlim=c(-16,6),
+       ilab=cbind(severe_all$case, severe_all$case_with_var, severe_all$control, severe_all$control_with_var),
+       ilab.xpos=c(-9.5,-8,-6,-4.5), header="Study",
+       slab=severe_all$study, xlab="Odds Ratio", cex=1)
+op <- par(cex=0.75, font=2)
+text(c(-9.5,-8,-6,-4.5), 4, c("CH+", "CH-", "CH+", "CH-"))
+text(c(-9,-5),     4.5, c("Death COVID", "No Death"))
+### add text with Q-value, dfs, p-value, and I^2 statistic
+text(-9.5, -1, pos=4, cex=1, bquote(paste("(p = ", .(formatC(res$pval, digits=2, format="f")), ")")))
+dev.off()
+```
